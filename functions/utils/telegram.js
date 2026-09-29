@@ -47,9 +47,8 @@ export function resolveFileType(file) {
   return mimeFromName(file.name) || type || 'application/octet-stream';
 }
 
-// EdgeOne's request.formData() File often has an empty MIME type, and its
-// fetch() drops binary parts when the body is a FormData. Copy the bytes into
-// a fresh File so later reads stay valid and the type can be inferred.
+// EdgeOne has no File constructor, and fetch() drops binary parts when the
+// body is a FormData. Keep the upload as plain bytes instead.
 export async function normalizeUploadFile(file) {
   if (!file || typeof file.arrayBuffer !== 'function') {
     throw new Error('No file uploaded');
@@ -57,12 +56,12 @@ export async function normalizeUploadFile(file) {
 
   const name = safeFilename(file.name);
   const type = resolveFileType(file);
-  const bytes = await file.arrayBuffer();
+  const bytes = new Uint8Array(await file.arrayBuffer());
   if (bytes.byteLength === 0) {
     throw new Error('Uploaded file is empty');
   }
 
-  return new File([bytes], name, { type });
+  return { name, type, bytes };
 }
 
 export function getUploadTarget(file) {
@@ -83,11 +82,14 @@ export function getUploadTarget(file) {
   return { endpoint: 'sendDocument', field: 'document' };
 }
 
-export function createTelegramFormData(chatId, field, file) {
-  const formData = new FormData();
-  formData.append('chat_id', String(chatId));
-  formData.append(field, file, safeFilename(file.name));
-  return formData;
+export function createTelegramUpload(chatId, field, file) {
+  return {
+    chatId: String(chatId),
+    field,
+    name: safeFilename(file.name),
+    type: file.type || 'application/octet-stream',
+    bytes: file.bytes,
+  };
 }
 
 export function getFileId(response) {
@@ -106,11 +108,11 @@ export function getFileId(response) {
   return null;
 }
 
-export async function sendToTelegram(formData, apiEndpoint, env, retryCount = 0) {
+export async function sendToTelegram(upload, apiEndpoint, env, retryCount = 0) {
   const apiUrl = `https://api.telegram.org/bot${env.TG_Bot_Token}/${apiEndpoint}`;
 
   try {
-    const payload = await encodeFormData(formData);
+    const payload = encodeUpload(upload);
     const response = await fetch(apiUrl, {
       method: 'POST',
       headers: { 'Content-Type': payload.contentType },
@@ -124,10 +126,7 @@ export async function sendToTelegram(formData, apiEndpoint, env, retryCount = 0)
 
     if (retryCount < MAX_RETRIES && apiEndpoint === 'sendPhoto') {
       console.log('Retrying image as document...');
-      const newFormData = new FormData();
-      newFormData.append('chat_id', formData.get('chat_id'));
-      newFormData.append('document', formData.get('photo'));
-      return await sendToTelegram(newFormData, 'sendDocument', env, retryCount + 1);
+      return await sendToTelegram({ ...upload, field: 'document' }, 'sendDocument', env, retryCount + 1);
     }
 
     return {
@@ -138,7 +137,7 @@ export async function sendToTelegram(formData, apiEndpoint, env, retryCount = 0)
     console.error('Network error:', error);
     if (retryCount < MAX_RETRIES) {
       await new Promise(resolve => setTimeout(resolve, 1000 * (retryCount + 1)));
-      return await sendToTelegram(formData, apiEndpoint, env, retryCount + 1);
+      return await sendToTelegram(upload, apiEndpoint, env, retryCount + 1);
     }
     return { success: false, error: 'Network error occurred' };
   }
@@ -154,32 +153,20 @@ async function parseTelegramResponse(response) {
   return { description: await response.text() };
 }
 
-async function encodeFormData(formData) {
-  const boundary = `----TelegramForm${crypto.randomUUID().replace(/-/g, '')}`;
+function encodeUpload(upload) {
+  const boundary = `----TelegramForm${randomHex(16)}`;
   const encoder = new TextEncoder();
-  const chunks = [];
-
-  for (const [name, value] of formData.entries()) {
-    chunks.push(encoder.encode(`--${boundary}\r\n`));
-
-    if (typeof value === 'string') {
-      chunks.push(encoder.encode(
-        `Content-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`
-      ));
-      continue;
-    }
-
-    const filename = safeFilename(value.name);
-    const type = value.type || 'application/octet-stream';
-    chunks.push(encoder.encode(
-      `Content-Disposition: form-data; name="${name}"; filename="${filename}"\r\n` +
-      `Content-Type: ${type}\r\n\r\n`
-    ));
-    chunks.push(new Uint8Array(await value.arrayBuffer()));
-    chunks.push(encoder.encode('\r\n'));
-  }
-
-  chunks.push(encoder.encode(`--${boundary}--\r\n`));
+  const chunks = [
+    encoder.encode(
+      `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="chat_id"\r\n\r\n${upload.chatId}\r\n` +
+      `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="${upload.field}"; filename="${upload.name}"\r\n` +
+      `Content-Type: ${upload.type}\r\n\r\n`
+    ),
+    upload.bytes,
+    encoder.encode(`\r\n--${boundary}--\r\n`),
+  ];
 
   return {
     body: concatBytes(chunks),
@@ -198,6 +185,12 @@ function concatBytes(chunks) {
   }
 
   return body;
+}
+
+function randomHex(byteLength) {
+  const bytes = new Uint8Array(byteLength);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
 }
 
 function safeFilename(name) {
