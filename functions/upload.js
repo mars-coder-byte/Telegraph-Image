@@ -1,4 +1,3 @@
-import { errorHandling, telemetryData } from "./utils/middleware.js";
 import { authenticateUploadRequest } from "./utils/auth.js";
 import { jsonResponse } from "./utils/http.js";
 import { createDefaultMetadata, putMetadata } from "./utils/metadata.js";
@@ -19,9 +18,6 @@ export async function onRequestPost(context) {
 
         const clonedRequest = request.clone();
         const formData = await clonedRequest.formData();
-
-        await errorHandling(context);
-        telemetryData(context);
 
         const uploadFile = formData.get('file');
         if (!uploadFile) {
