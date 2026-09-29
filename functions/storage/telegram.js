@@ -35,11 +35,11 @@ export const telegramProvider = {
 
     async fetchFile(env, request, url, fileId) {
         const fileUrl = await resolveFileUrl(env, url, fileId);
-        return fetch(fileUrl, {
-            method: request.method,
-            headers: request.headers,
-            body: request.body,
-        });
+        // Do not forward the visitor's headers. EdgeOne keeps Host and
+        // Accept-Encoding, and Telegram's file then comes back compressed or
+        // truncated, which browsers render as a black image.
+        const method = request.method === 'HEAD' ? 'HEAD' : 'GET';
+        return fetch(fileUrl, { method });
     },
 };
 

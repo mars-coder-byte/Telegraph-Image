@@ -109,6 +109,30 @@ describe('file proxy function', function () {
     assert.strictEqual(await res.text(), 'image-body');
   });
 
+  it('labels a Telegram photo as jpeg when the saved extension is png', async function () {
+    const onRequest = await getOnRequest();
+    const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
+
+    fetchMock = installFetchMock(async () => new Response(jpeg, {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'Content-Encoding': 'gzip',
+      },
+    }));
+
+    const res = await onRequest(makeContext({
+      request: new Request('https://example.com/file/cat.png'),
+      env: {},
+      params: { id: 'cat.png' },
+    }));
+
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(res.headers.get('Content-Type'), 'image/jpeg');
+    assert.strictEqual(res.headers.get('Content-Encoding'), null);
+    assert.deepStrictEqual(new Uint8Array(await res.arrayBuffer()), jpeg);
+  });
+
   it('leaves octet-stream files with unknown extensions untouched', async function () {
     const onRequest = await getOnRequest();
 
@@ -380,11 +404,19 @@ describe('file proxy function', function () {
 
       assert.strictEqual(String(input), 'https://api.telegram.org/file/botbot-token/photos/file_1.png');
       assert.strictEqual(init.method, 'GET');
+      const forwarded = new Headers(init.headers || {});
+      assert.strictEqual(forwarded.get('Authorization'), null);
+      assert.strictEqual(forwarded.get('Accept-Encoding'), null);
       return new Response('telegram-file', { status: 200 });
     });
 
     const res = await onRequest(makeContext({
-      request: new Request(`https://example.com/file/${fileName}`),
+      request: new Request(`https://example.com/file/${fileName}`, {
+        headers: {
+          Authorization: 'Bearer secret',
+          'Accept-Encoding': 'gzip',
+        },
+      }),
       env: { img_url, TG_Bot_Token: 'bot-token' },
       params: { id: fileName },
     }));

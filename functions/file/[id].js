@@ -35,20 +35,20 @@ export async function onRequest(context) {
     // Allow the admin page to directly view the image
     const isAdmin = request.headers.get('Referer')?.includes(`${url.origin}/admin`);
     if (isAdmin) {
-        return withFileHeaders(response, fileId);
+        return await withFileHeaders(response, fileId);
     }
 
     // Check if KV storage is available
     if (!env.img_url) {
         console.log("KV storage not available, returning image directly");
-        return withFileHeaders(response, fileId);  // Directly return image response, terminate execution
+        return await withFileHeaders(response, fileId);  // Directly return image response, terminate execution
     }
 
     const metadata = await getOrCreateMetadata(env, fileId);
 
     // Handle based on ListType and Label
     if (isWhitelisted(metadata)) {
-        return withFileHeaders(response, fileId);
+        return await withFileHeaders(response, fileId);
     } else if (isBlocked(metadata)) {
         const referer = request.headers.get('Referer');
         const redirectUrl = referer ? "https://static-res.pages.dev/teleimage/img-block-compressed.png" : `${url.origin}/block-img.html`;
@@ -72,7 +72,7 @@ export async function onRequest(context) {
     await putMetadata(env, fileId, metadata);
 
     // Return file content
-    return withFileHeaders(response, fileId);
+    return await withFileHeaders(response, fileId);
 }
 
 // Short ids are resolved before the file URL is built, so short links work for
@@ -152,29 +152,60 @@ async function moderateFile(env, url, fileId, metadata, response) {
     return { blocked: isBlocked(metadata) };
 }
 
-function withFileHeaders(response, filename) {
+async function withFileHeaders(response, filename) {
     const upstreamType = response.headers.get('Content-Type') || '';
-    const correctedType = isUsableContentType(upstreamType) ? null : contentTypeFromFilename(filename);
-    const effectiveType = correctedType || upstreamType;
-    const inline = isPreviewableContent(effectiveType) || isPreviewableFilename(filename);
+    const filenameType = isUsableContentType(upstreamType) ? null : contentTypeFromFilename(filename);
+    const inline = isPreviewableContent(upstreamType) || isPreviewableFilename(filename) || Boolean(filenameType);
 
-    if (!correctedType && !inline) {
+    if (!filenameType && !inline) {
         return response;
     }
 
-    const headers = new Headers(response.headers);
-    if (correctedType) {
-        headers.set('Content-Type', correctedType);
-    }
-    if (inline) {
+    // Buffer the body and drop Content-Encoding. A streamed response that still
+    // carries gzip headers is handed to the browser as compressed bytes.
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const sniffed = sniffContentType(bytes);
+    const effectiveType = sniffed
+        || filenameType
+        || (isUsableContentType(upstreamType) ? upstreamType.split(';')[0].trim() : '')
+        || 'application/octet-stream';
+
+    const headers = new Headers();
+    headers.set('Content-Type', effectiveType);
+    if (isPreviewableContent(effectiveType) || isPreviewableFilename(filename)) {
         headers.set('Content-Disposition', `inline; filename="${escapeFilename(filename)}"`);
     }
+    const cacheControl = response.headers.get('Cache-Control');
+    if (cacheControl) {
+        headers.set('Cache-Control', cacheControl);
+    }
 
-    return new Response(response.body, {
+    return new Response(bytes, {
         status: response.status,
         statusText: response.statusText,
         headers,
     });
+}
+
+function sniffContentType(bytes) {
+    if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+        return 'image/jpeg';
+    }
+    if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
+        return 'image/png';
+    }
+    if (bytes.length >= 6 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) {
+        return 'image/gif';
+    }
+    if (bytes.length >= 12
+        && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46
+        && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) {
+        return 'image/webp';
+    }
+    if (bytes.length >= 5 && bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46) {
+        return 'application/pdf';
+    }
+    return null;
 }
 
 function isUsableContentType(contentType) {
