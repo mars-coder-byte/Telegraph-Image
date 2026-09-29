@@ -3,6 +3,7 @@ import {
     getFileId,
     getTelegramFilePath,
     getUploadTarget,
+    normalizeUploadFile,
     sendToTelegram,
     validateTelegramConfig,
 } from '../utils/telegram.js';
@@ -15,8 +16,9 @@ export const telegramProvider = {
     },
 
     async upload(env, file, { fileExtension }) {
-        const { endpoint, field } = getUploadTarget(file);
-        const formData = createTelegramFormData(env.TG_Chat_ID, field, file);
+        const normalized = await normalizeUploadFile(file);
+        const { endpoint, field } = getUploadTarget(normalized);
+        const formData = createTelegramFormData(env.TG_Chat_ID, field, normalized);
 
         const result = await sendToTelegram(formData, endpoint, env);
         if (!result.success) {

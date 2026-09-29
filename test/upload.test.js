@@ -17,6 +17,13 @@ describe('upload function', function () {
     restoreConsole();
   });
 
+  function multipartText(init) {
+    const contentType = init.headers['Content-Type'] || '';
+    assert.ok(contentType.includes('multipart/form-data'), contentType);
+    assert.ok(init.body instanceof Uint8Array);
+    return new TextDecoder().decode(init.body);
+  }
+
   async function createUploadRequest(file) {
     const formData = new FormData();
     formData.append('file', file);
@@ -34,8 +41,12 @@ describe('upload function', function () {
     fetchMock = installFetchMock(async (input, init) => {
       assert.strictEqual(String(input), 'https://api.telegram.org/botbot-token/sendPhoto');
       assert.strictEqual(init.method, 'POST');
-      assert.strictEqual(init.body.get('chat_id'), '-100123');
-      assert.ok(init.body.get('photo') instanceof File);
+      const body = multipartText(init);
+      assert.ok(body.includes('name="chat_id"'));
+      assert.ok(body.includes('-100123'));
+      assert.ok(body.includes('name="photo"; filename="cat.png"'));
+      assert.ok(body.includes('Content-Type: image/png'));
+      assert.ok(body.includes('image-bytes'));
 
       return Response.json({
         ok: true,
@@ -79,12 +90,16 @@ describe('upload function', function () {
     fetchMock = installFetchMock(async (input, init, calls) => {
       if (calls.length === 1) {
         assert.strictEqual(String(input), 'https://api.telegram.org/botbot-token/sendPhoto');
-        assert.ok(init.body.get('photo') instanceof File);
+        const photoBody = multipartText(init);
+        assert.ok(photoBody.includes('name="photo"; filename="cat.webp"'));
+        assert.ok(photoBody.includes('image-bytes'));
         return Response.json({ ok: false, description: 'Bad Request: wrong file identifier' }, { status: 400 });
       }
 
       assert.strictEqual(String(input), 'https://api.telegram.org/botbot-token/sendDocument');
-      assert.ok(init.body.get('document') instanceof File);
+      const documentBody = multipartText(init);
+      assert.ok(documentBody.includes('name="document"; filename="cat.webp"'));
+      assert.ok(documentBody.includes('image-bytes'));
       return Response.json({
         ok: true,
         result: {
@@ -113,8 +128,11 @@ describe('upload function', function () {
 
     fetchMock = installFetchMock(async (input, init) => {
       assert.strictEqual(String(input), 'https://api.telegram.org/botbot-token/sendDocument');
-      assert.strictEqual(init.body.get('chat_id'), '-100123');
-      assert.ok(init.body.get('document') instanceof File);
+      const body = multipartText(init);
+      assert.ok(body.includes('name="chat_id"'));
+      assert.ok(body.includes('-100123'));
+      assert.ok(body.includes('name="document"; filename="notes.txt"'));
+      assert.ok(body.includes('hello'));
       return Response.json({
         ok: true,
         result: {
@@ -135,6 +153,37 @@ describe('upload function', function () {
 
     assert.strictEqual(res.status, 200);
     assert.deepStrictEqual(JSON.parse(await res.text()), [{ src: '/file/doc-id.txt' }]);
+  });
+
+  it('treats an extension-only image as a photo when the browser omits the MIME type', async function () {
+    const { onRequestPost } = await import('../functions/upload.js');
+
+    fetchMock = installFetchMock(async (input, init) => {
+      assert.strictEqual(String(input), 'https://api.telegram.org/botbot-token/sendPhoto');
+      const body = multipartText(init);
+      assert.ok(body.includes('name="photo"; filename="20260929-114144.png"'));
+      assert.ok(body.includes('Content-Type: image/png'));
+      assert.ok(body.includes('png-bytes'));
+      return Response.json({
+        ok: true,
+        result: {
+          photo: [{ file_id: 'png-id', file_size: 9 }],
+        },
+      });
+    });
+
+    const request = await createUploadRequest(new File(['png-bytes'], '20260929-114144.png', { type: '' }));
+    const res = await onRequestPost(makeContext({
+      request,
+      env: {
+        disable_telemetry: 'true',
+        TG_Bot_Token: 'bot-token',
+        TG_Chat_ID: '-100123',
+      },
+    }));
+
+    assert.strictEqual(res.status, 200);
+    assert.deepStrictEqual(JSON.parse(await res.text()), [{ src: '/file/png-id.png' }]);
   });
 
   it('returns a JSON error when the upload form has no file field', async function () {
